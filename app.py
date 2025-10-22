@@ -11,7 +11,7 @@ CONFIG_FILE = Path("pickleball_config.json")
 # ────────────────────────────── DEFAULTS ──────────────────────────────
 DEFAULT_MAX_PLAYERS = 20
 DEFAULT_NUM_COURTS = 3
-MAX_STREAK = 2  # Max consecutive games per player
+MAX_STREAK = 2  # Max consecutive games
 
 # ────────────────────────────── HELPERS ──────────────────────────────
 def load_json(path, default):
@@ -69,7 +69,7 @@ def assign_all_courts():
 
 def assign_court(court_index):
     # Keep players with streak < MAX_STREAK
-    staying = [p for p in data["courts"][court_index] if data["streaks"].get(p,0) < MAX_STREAK]
+    staying = [p for p in data["courts"][court_index] if data["streaks"].get(p, 0) < MAX_STREAK]
 
     # Fill remaining spots
     while len(staying) < 4 and data["queue"]:
@@ -97,33 +97,27 @@ def process_court_result(court_index, winning_team, rerun=True):
 
     new_court = []
 
-    # Handle winners
+    # Increment streak for everyone on court
+    for p in court:
+        data["streaks"][p] = data["streaks"].get(p, 0) + 1
+
+    # Process winners
     for w in winners:
-        streak = data["streaks"].get(w, 0)
-        if streak < MAX_STREAK:
+        if data["streaks"][w] <= MAX_STREAK:
             new_court.append(w)
-            data["streaks"][w] = streak + 1
         else:
             data["streaks"][w] = 0
             data["queue"].append(w)
 
-    # Handle losers
+    # Process losers
     for l in losers:
-        data["streaks"][l] = 0
-        data["queue"].append(l)
+        if l not in new_court:
+            data["streaks"][l] = 0
+            data["queue"].append(l)
 
-    # Fill remaining spots
+    # Fill remaining spots from queue
     while len(new_court) < 4 and data["queue"]:
-        # minimize repeat matches
-        best_candidate = data["queue"][0]
-        min_repeats = count_repeat_matches(new_court + [best_candidate], data["history"])
-        for candidate in data["queue"]:
-            repeats = count_repeat_matches(new_court + [candidate], data["history"])
-            if repeats < min_repeats:
-                min_repeats = repeats
-                best_candidate = candidate
-        new_court.append(best_candidate)
-        data["queue"].remove(best_candidate)
+        new_court.append(data["queue"].pop(0))
 
     data["courts"][court_index] = new_court
     data["history"].append({
@@ -153,7 +147,7 @@ def reset_streaks():
 st.set_page_config(page_title="🏓 Pickleball Scheduler", layout="wide")
 st.title("🏓 Pickleball Open Play Scheduler")
 
-# Sidebar configuration
+# Sidebar
 with st.sidebar:
     st.header("⚙️ Configuration")
     max_players = st.slider("Max Players", 8, 30, config["max_players"], 1)
@@ -201,14 +195,13 @@ with st.sidebar:
     if st.button("🔄 Reset All Player Streaks"):
         reset_streaks()
 
-# Display player queue
+# Display queue
 st.subheader("🎯 Player Queue")
 st.write(", ".join(data["queue"]) if data["queue"] else "Queue is empty — add players or initialize.")
 
 # Display courts
 st.subheader("🏟️ Courts")
 cols = st.columns(config["num_courts"])
-
 for i, col in enumerate(cols):
     with col:
         st.markdown(f"### Court {i+1}")
