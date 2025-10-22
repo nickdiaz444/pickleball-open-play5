@@ -14,7 +14,6 @@ MAX_STREAK = 2  # winners stay for up to 2 consecutive games
 # ---------------------------
 # Helper Functions
 # ---------------------------
-
 def load_data():
     if DATA_FILE.exists():
         with open(DATA_FILE, "r") as f:
@@ -128,12 +127,12 @@ for i in range(MAX_COURTS):
     if key not in st.session_state:
         st.session_state[key] = ""
 
+data = st.session_state.data
+
 # ---------------------------
 # Sidebar Config
 # ---------------------------
 st.sidebar.header("⚙️ Configuration")
-data = st.session_state.data
-
 data["auto_fill"] = st.sidebar.checkbox("Auto-Fill Courts Continuously", value=data.get("auto_fill", False))
 if st.sidebar.button("Reset Everything"):
     reset_everything()
