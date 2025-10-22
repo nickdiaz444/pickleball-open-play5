@@ -1,217 +1,251 @@
 import streamlit as st
 import json
 from pathlib import Path
-import pandas as pd
+import random
 
-# ---------------------------
-# Constants
-# ---------------------------
+# ────────────────────────────── FILES ──────────────────────────────
 DATA_FILE = Path("pickleball_data.json")
-MAX_COURTS = 3
-MAX_PLAYERS = 20
-MAX_STREAK = 2  # winners stay for up to 2 consecutive games
+CONFIG_FILE = Path("pickleball_config.json")
 
-# ---------------------------
-# Helper Functions
-# ---------------------------
-def load_data():
-    if DATA_FILE.exists():
-        with open(DATA_FILE, "r") as f:
+# ────────────────────────────── DEFAULTS ──────────────────────────────
+DEFAULT_MAX_PLAYERS = 20
+DEFAULT_NUM_COURTS = 3
+MAX_STREAK = 2  # max consecutive games
+
+# ────────────────────────────── HELPERS ──────────────────────────────
+def load_json(path, default):
+    if path.exists():
+        with open(path, "r") as f:
             return json.load(f)
+    return default
+
+def save_json(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
+def rerun_app():
+    if hasattr(st, "rerun"):
+        st.rerun()
     else:
-        # initialize empty structure
-        return {
-            "players": [],
-            "queue": [],
-            "courts": [[] for _ in range(MAX_COURTS)],
-            "streaks": {},
-            "history": [],
-            "auto_fill": False
-        }
+        st.experimental_rerun()
 
-def save_data(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+# ────────────────────────────── LOAD CONFIG & DATA ──────────────────────────────
+config = load_json(CONFIG_FILE, {"max_players": DEFAULT_MAX_PLAYERS, "num_courts": DEFAULT_NUM_COURTS})
+data = load_json(DATA_FILE, {
+    "players": [],
+    "queue": [],
+    "courts": [[] for _ in range(config["num_courts"])],
+    "streaks": {},
+    "history": []
+})
 
-def reset_everything():
-    st.session_state.data = load_data()
-    st.session_state.data["players"] = []
-    st.session_state.data["queue"] = []
-    st.session_state.data["courts"] = [[] for _ in range(MAX_COURTS)]
-    st.session_state.data["streaks"] = {}
-    st.session_state.data["history"] = []
-    save_data(st.session_state.data)
-    st.success("All data reset!")
+# ────────────────────────────── LOGIC ──────────────────────────────
+def initialize_queue():
+    if not data["players"]:
+        st.warning("Add players first.")
+        return
+    data["queue"] = data["players"][:]
+    random.shuffle(data["queue"])
+    save_json(DATA_FILE, data)
+    rerun_app()
 
-def assign_empty_courts():
-    data = st.session_state.data
-    for i in range(MAX_COURTS):
-        if len(data["courts"][i]) < 4:
-            needed = 4 - len(data["courts"][i])
-            for _ in range(needed):
-                if data["queue"]:
-                    data["courts"][i].append(data["queue"].pop(0))
-    save_data(data)
+def assign_all_courts():
+    for i in range(config["num_courts"]):
+        assign_court(i)
+    save_json(DATA_FILE, data)
+    rerun_app()
 
-def process_court_winner(court_index, winning_team):
-    data = st.session_state.data
-    court_players = data["courts"][court_index]
-    if len(court_players) != 4:
-        return  # can't process incomplete court
+def assign_court(court_index):
+    # Keep winners with streak < MAX_STREAK
+    staying = [p for p in data["courts"][court_index] if data["streaks"].get(p,0) < MAX_STREAK]
+    
+    # Fill court to 4 players from queue
+    while len(staying) < 4 and data["queue"]:
+        staying.append(data["queue"].pop(0))
+    
+    data["courts"][court_index] = staying
 
-    team1 = court_players[:2]
-    team2 = court_players[2:]
-    winners = team1 if winning_team == "Team 1" else team2
-    losers = team2 if winning_team == "Team 1" else team1
+def process_court_result(court_index, winning_team, rerun=True):
+    court = data["courts"][court_index]
+    if len(court) < 4:
+        st.warning("Not enough players on this court.")
+        return
 
-    # Determine staying winners and leaving winners
-    staying_winners = [p for p in winners if data["streaks"].get(p,0) < MAX_STREAK]
-    leaving_winners = [p for p in winners if data["streaks"].get(p,0) >= MAX_STREAK]
+    # Determine winners and losers
+    winners = court[:2] if winning_team == "Team 1" else court[2:]
+    losers = court[2:] if winning_team == "Team 1" else court[:2]
 
-    # Increment streaks for staying winners
-    for p in staying_winners:
-        data["streaks"][p] = data["streaks"].get(p,0) + 1
+    staying = []
+    leaving = []
 
-    # Reset streaks for leaving winners and losers, move them to queue
-    for p in leaving_winners + losers:
-        data["streaks"][p] = 0
-        if p not in data["queue"]:
-            data["queue"].append(p)
+    # Handle winners
+    for w in winners:
+        streak = data["streaks"].get(w, 0)
+        if streak < MAX_STREAK:
+            staying.append(w)
+            data["streaks"][w] = streak + 1
+        else:
+            data["streaks"][w] = 0
+            data["queue"].append(w)
+            leaving.append(w)
 
-    # Fill court up to 4 players from queue
-    needed = 4 - len(staying_winners)
-    new_players = []
-    for _ in range(needed):
-        if data["queue"]:
-            new_players.append(data["queue"].pop(0))
+    # Handle losers
+    for l in losers:
+        data["streaks"][l] = 0
+        data["queue"].append(l)
+        leaving.append(l)
 
-    # Rebuild court
-    data["courts"][court_index] = staying_winners + new_players
+    # Rebuild court with staying winners split if possible
+    new_court = []
+    if len(staying) >= 2:
+        # Try to split winners, but allow together if not enough players
+        new_court = [staying[0]]  # Team 1
+        if len(data["queue"]) >= 2:
+            new_court += [data["queue"].pop(0), data["queue"].pop(0)]
+        else:
+            while len(new_court) < 3 and data["queue"]:
+                new_court.append(data["queue"].pop(0))
+        new_court.append(staying[1])  # Team 2 winner
+    elif len(staying) == 1:
+        new_court = [staying[0]]
+        while len(new_court) < 4 and data["queue"]:
+            new_court.append(data["queue"].pop(0))
+    else:
+        while len(new_court) < 4 and data["queue"]:
+            new_court.append(data["queue"].pop(0))
 
-    # Record in history
+    data["courts"][court_index] = new_court
     data["history"].append({
         "court": court_index + 1,
-        "team_won": winning_team,
-        "players": court_players.copy()
+        "winners": winners,
+        "losers": losers
     })
 
-def update_all_courts():
-    data = st.session_state.data
-    for i in range(MAX_COURTS):
-        winner_key = f"court_winner_{i}"
-        winner = st.session_state.get(winner_key, "")
-        if winner in ["Team 1", "Team 2"]:
-            process_court_winner(i, winner)
-            st.session_state[winner_key] = ""  # reset selection after processing
-    assign_empty_courts()
-    save_data(data)
-    st.success("All courts updated!")
+    save_json(DATA_FILE, data)
+    if rerun:
+        rerun_app()
 
-def reset_court(court_index):
-    data = st.session_state.data
-    for p in data["courts"][court_index]:
+def reset_all_data():
+    if DATA_FILE.exists():
+        DATA_FILE.unlink()
+    st.session_state.clear()
+    rerun_app()
+
+def reset_streaks():
+    for p in data["streaks"]:
         data["streaks"][p] = 0
-        if p not in data["queue"]:
-            data["queue"].append(p)
-    data["courts"][court_index] = []
-    assign_empty_courts()
-    save_data(data)
+    save_json(DATA_FILE, data)
+    st.success("All player streaks reset to 0")
+    rerun_app()
 
-# ---------------------------
-# Initialize session_state
-# ---------------------------
-if "data" not in st.session_state:
-    st.session_state.data = load_data()
-for i in range(MAX_COURTS):
-    key = f"court_winner_{i}"
-    if key not in st.session_state:
-        st.session_state[key] = ""
+# ────────────────────────────── UI ──────────────────────────────
+st.set_page_config(page_title="🏓 Pickleball Open Play Scheduler", layout="wide")
+st.title("🏓 Pickleball Open Play Scheduler")
 
-data = st.session_state.data
+# Sidebar config
+with st.sidebar:
+    st.header("⚙️ Configuration")
+    max_players = st.slider("Max Players", 8, 30, config["max_players"], 1)
+    num_courts = st.slider("Number of Courts", 1, 5, config["num_courts"], 1)
+    
+    if st.button("💾 Save Config"):
+        config["max_players"] = max_players
+        config["num_courts"] = num_courts
+        save_json(CONFIG_FILE, config)
+        data["courts"] = [[] for _ in range(config["num_courts"])]
+        save_json(DATA_FILE, data)
+        rerun_app()
 
-# ---------------------------
-# Sidebar Config
-# ---------------------------
-st.sidebar.header("⚙️ Configuration")
-data["auto_fill"] = st.sidebar.checkbox("Auto-Fill Courts Continuously", value=data.get("auto_fill", False))
-if st.sidebar.button("Reset Everything"):
-    reset_everything()
-
-with st.sidebar.expander("Add Players"):
-    bulk_input = st.text_area("One player per line (max 20 players)")
-    if st.button("Add Players", key="add_players"):
-        new_players = [p.strip() for p in bulk_input.splitlines() if p.strip()]
+    st.divider()
+    st.write("### Add Players (one per line)")
+    new_players_text = st.text_area("Enter player names:", height=150)
+    if st.button("Add / Update Players"):
+        new_players = [p.strip() for p in new_players_text.splitlines() if p.strip()]
         for p in new_players:
-            if p not in data["players"] and len(data["players"]) < MAX_PLAYERS:
+            if p not in data["players"]:
                 data["players"].append(p)
                 data["queue"].append(p)
                 data["streaks"][p] = 0
-        save_data(data)
-        st.success(f"Added {len(new_players)} players.")
+        save_json(DATA_FILE, data)
+        rerun_app()
 
-# ---------------------------
-# Main App
-# ---------------------------
-st.title("🏓 Pickleball Open Play Scheduler")
-tabs = st.tabs(["Courts", "Queue", "History"])
+    st.write("### Active Players")
+    active_cols = st.columns(2)
+    for i, p in enumerate(data["players"]):
+        col = active_cols[i % 2]
+        active = col.checkbox(f"{p}", value=(p in data["queue"]))
+        if active and p not in data["queue"]:
+            data["queue"].append(p)
+        elif not active and p in data["queue"]:
+            data["queue"].remove(p)
+    save_json(DATA_FILE, data)
 
-# ---------------------------
-# Courts Tab
-# ---------------------------
-with tabs[0]:
-    st.subheader("Active Courts")
-    if st.button("Assign Empty Courts"):
-        assign_empty_courts()
-        st.success("Empty courts filled from queue.")
+    st.divider()
+    if st.button("Initialize Queue"):
+        initialize_queue()
+    if st.button("Assign all courts"):
+        assign_all_courts()
+    if st.button("Reset everything"):
+        reset_all_data()
+    if st.button("🔄 Reset All Player Streaks"):
+        reset_streaks()
 
-    for i, court_players in enumerate(data["courts"]):
+# Display queue
+st.subheader("🎯 Player Queue")
+st.write(", ".join(data["queue"]) if data["queue"] else "Queue is empty — add players or initialize.")
+
+# Display courts
+st.subheader("🏟️ Courts")
+cols = st.columns(config["num_courts"])
+
+for i, col in enumerate(cols):
+    with col:
         st.markdown(f"### Court {i+1}")
-        if len(court_players) != 4:
-            st.info("Court not full")
+        court = data["courts"][i]
+        if not court or len(court) < 4:
+            st.info("No game assigned or incomplete court.")
         else:
-            col1, col2 = st.columns(2)
-            col1.markdown(f"**Team 1:** {', '.join(court_players[:2])}")
-            col2.markdown(f"**Team 2:** {', '.join(court_players[2:])}")
+            st.write(f"**Team 1:** {court[0]} & {court[1]}")
+            st.write(f"**Team 2:** {court[2]} & {court[3]}")
 
-            # Winner selection
-            winner_key = f"court_winner_{i}"
-            st.session_state[winner_key] = st.selectbox(
-                f"Select winner (Court {i+1})",
-                ["", "Team 1", "Team 2"],
-                index=["", "Team 1", "Team 2"].index(st.session_state[winner_key]),
-                key=f"{winner_key}_selectbox"
+            key_name = f"winner_{i}"
+            if key_name not in st.session_state:
+                st.session_state[key_name] = "None"
+
+            st.session_state[key_name] = st.radio(
+                f"Select winner for Court {i+1}",
+                ["None", "Team 1", "Team 2"],
+                index=["None", "Team 1", "Team 2"].index(st.session_state[key_name]),
+                key=f"radio_{i}"
             )
 
-            if st.button(f"Reset Court {i+1}", key=f"reset_{i}"):
-                reset_court(i)
-                st.info(f"Court {i+1} reset.")
+            if st.button(f"Submit result for Court {i+1}", key=f"submit_{i}"):
+                if st.session_state[key_name] != "None":
+                    process_court_result(i, st.session_state[key_name])
+                    st.session_state[key_name] = "None"
 
-    if st.button("Update All Courts"):
-        update_all_courts()
+# Submit all winners
+if st.button("Submit All Court Winners"):
+    any_selected = False
+    for i in range(config["num_courts"]):
+        key_name = f"winner_{i}"
+        winner = st.session_state.get(key_name, "None")
+        if winner in ["Team 1", "Team 2"]:
+            process_court_result(i, winner, rerun=False)
+            st.session_state[key_name] = "None"
+            any_selected = True
+    if any_selected:
+        save_json(DATA_FILE, data)
+        st.success("All court winners processed!")
+        rerun_app()
 
-# ---------------------------
-# Queue Tab
-# ---------------------------
-with tabs[1]:
-    st.subheader("Queue")
-    st.write(", ".join(data["queue"]))
-
-# ---------------------------
-# History Tab
-# ---------------------------
-with tabs[2]:
-    st.subheader("Game History")
-    if data["history"]:
-        rows = []
-        for h in data["history"]:
-            rows.append({
-                "Court": h["court"],
-                "Winner": h["team_won"],
-                "Player 1": h["players"][0],
-                "Player 2": h["players"][1],
-                "Player 3": h["players"][2],
-                "Player 4": h["players"][3],
-            })
-        st.dataframe(pd.DataFrame(rows))
-    else:
-        st.info("No games played yet.")
+# Match history
+st.subheader("📜 Match History")
+if data["history"]:
+    for match in reversed(data["history"][-10:]):
+        st.write(
+            f"**Court {match['court']}** — Winners: {', '.join(match['winners'])} | "
+            f"Losers: {', '.join(match['losers'])}"
+        )
+else:
+    st.write("No matches played yet.")
